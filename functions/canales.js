@@ -42,14 +42,14 @@
  *   FUENTE_GRANDE     por defecto: youcefyakhoo/cesopppplop canales-compacto.json
  */
 
-const PEQUENIA = 'https://raw.githubusercontent.com/belkaperu/belkafut/refs/heads/main/data_unificado.json';
-const GRANDE = 'https://raw.githubusercontent.com/youcefyakhoo/cesopppplop/refs/heads/main/canales-compacto.json';
+export const PEQUENIA = 'https://raw.githubusercontent.com/belkaperu/belkafut/refs/heads/main/data_unificado.json';
+export const GRANDE = 'https://raw.githubusercontent.com/youcefyakhoo/cesopppplop/refs/heads/main/canales-compacto.json';
 
 /** Canales por shard. Con 150: 257 shards de ~13 KB. */
-const CHUNK = 150;
+export const CHUNK = 150;
 
 /** Los topes de la app (AutoCanales.TOPE_CORTO / TOPE_LATAM / TOPE_GLOBAL). */
-const SCOPES = { corto: 600, latam: 2500, global: 12000 };
+export const SCOPES = { corto: 600, latam: 2500, global: 12000 };
 
 // ─────────────────────────── utilidades ───────────────────────────
 
