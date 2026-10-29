@@ -1,0 +1,11 @@
+name = "pelislatino-canales"
+compatibility_date = "2025-01-01"
+pages_build_output_dir = "."
+
+# No hay build: la carpeta se sube tal cual y Cloudflare sirve functions/ como
+# Pages Functions. Nada de node_modules, nada de bundler.
+
+[vars]
+# Se pueden sobreescribir con `wrangler pages secret put` (ver README).
+FUENTE_PEQUENIA = "https://raw.githubusercontent.com/belkaperu/belkafut/refs/heads/main/data_unificado.json"
+FUENTE_GRANDE = "https://raw.githubusercontent.com/youcefyakhoo/cesopppplop/refs/heads/main/canales-compacto.json"
