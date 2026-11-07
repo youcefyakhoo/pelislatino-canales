@@ -98,14 +98,76 @@ function mapaGrupos(cats) {
   return m;
 }
 
+/**
+ * CANALES CAÍDOS — v7.36 (pedido 44b: «quitar los canales que no funcionan»).
+ *
+ * Medido el 2026-11-07 contra las 145 URLs del catálogo, con las cabeceras de un
+ * móvil Android y dos pasadas separadas para no borrar un canal por un fallo puntual.
+ *
+ * QUÉ SE QUITA (muerte CIERTA, no hay nada que interpretar):
+ *   · hosts que ya no existen o están caídos enteros (DNS no resuelve, SSL roto)
+ *   · URLs que dan 404 en las dos pasadas
+ *   · players .html cuyo m3u8 real (el que va en base64) da 404
+ *
+ * QUÉ NO SE QUITA A PROPÓSITO, porque desde aquí no se puede distinguir «muerto» de
+ * «bloqueado para mi IP», y borrarlos sería tirar canales que al usuario le funcionan:
+ *   · los 403 de Bitel Perú y CDN geo-restringidos (America TV, Panamericana, TV Perú,
+ *     teleamazonas, DirecTV Sports)
+ *   · los URLError de CloudFront/Akamai (URL firmada caducada o IP bloqueada)
+ *   · los 5 que fallaron UNA vez y en la segunda pasada iban bien (ABN, Canal A03C,
+ *     GOLDEN PREMIER, Movistar Liga de Campeones, 24HV)
+ *   · los 275 embeds .php de embed.saohgdasregions.fun: un 200 solo dice que la
+ *     página carga, no que el vídeo se vea
+ *
+ * Va AQUÍ y no en los JSON porque `tools/generar.js` los regenera cada día a las
+ * 05:17 UTC: lo borrado de los JSON resucitaría al día siguiente. Este filtro lo
+ * aplican las dos fuentes y el generador, así que sale en shards, scopes y pequena.
+ */
+
+/** Host caído entero → motivo. Si el host está aquí, ninguna de sus URLs sirve. */
+const HOST_CAIDO = {
+  'anceprov.best': 'el dominio ya no resuelve en DNS',
+  'dodousd.github.io': 'HTTP 404 en todas las URLs',
+  'la20hd.com': 'el dominio ya no resuelve en DNS',
+  'stream-xhd.com': 'SSL roto en todas las URLs',
+  'streamhdx.com': 'SSL roto en todas las URLs',
+  'streamx-hd.com': 'SSL roto en todas las URLs',
+  'streamx996.one': 'HTTP 404 en todas las URLs',
+};
+
+/** Rutas concretas que se fueron, en hosts que siguen vivos. */
+const RUTA_CAIDA = new Set([
+  'http://200.10.30.241:8000/play/a049/index.m3u8',
+  'http://45.228.234.30:16000/play/a033/index.m3u8',
+  'http://45.228.234.30:16000/play/a04f/index.m3u8',
+  'https://alilus.github.io/lobinnnnnnnsnsnsn/m3u8player.html?url=aHR0cHM6Ly9saXZlLm9ic2xpdmVzdHJlYW0uY29tL3BsYW5ldGF0di90cmFja3MtdjNhMS9tb25vLm0zdTg=',
+  'https://alilus.github.io/lobinnnnnnnsnsnsn/m3u8player.html?url=aHR0cHM6Ly9sdW5hLTEtdmlkZW8ubWVkaWFzZXJ2ZXIuZGlnaXRhbC9leGl0b3NhdHZfMjMzYi00YjQ5LWE3MjYtNWEzY2IwZTMyNDNjL2luZGV4Lm0zdTg=',
+  'https://alilus.github.io/lobinnnnnnnsnsnsn/m3u8player.html?url=aHR0cHM6Ly9vaGEudG8vcGxheS80NDE1NTQ5OTMvaW5kZXgubTN1OA==',
+]);
+
+/** El host de una URL, sin puerto ni ruta. '' si no es http(s). */
+function hostDe(u) {
+  const m = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(u || '');
+  return m ? m[1].toLowerCase() : '';
+}
+
+/** true si la URL está muerta con certeza. */
+function urlCaida(u) {
+  if (!u) return false;
+  if (RUTA_CAIDA.has(u)) return true;
+  return Object.prototype.hasOwnProperty.call(HOST_CAIDO, hostDe(u));
+}
+
 function opciones(servers, options) {
   const out = [];
   for (const s of (servers || [])) {
     if (!s || !esUrl(s.url)) continue;
+    if (urlCaida(s.url)) continue;            // v7.36: canal caído, fuera
     out.push({ label: (s.name || '').trim(), url: s.url });
   }
   for (const o of (options || [])) {
     if (!o || !esUrl(o.url)) continue;
+    if (urlCaida(o.url)) continue;            // v7.36: canal caído, fuera
     out.push({ label: (o.label || '').trim(), url: o.url });
   }
   return out;
@@ -159,6 +221,7 @@ function deCompacto(json) {
     for (const c of canales) {
       const url = c.servers && c.servers[0] && c.servers[0].url;
       if (!esUrl(url)) continue;
+      if (urlCaida(url)) continue;            // v7.36: canal caído, fuera
       const titulo = (c.name || c.title || '').trim();
       if (!titulo) continue;
       salida.push({
