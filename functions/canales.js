@@ -109,12 +109,6 @@ function mapaGrupos(cats) {
  *   · URLs que dan 404 en las dos pasadas
  *   · players .html cuyo m3u8 real (el que va en base64) da 404
  *
- * v7.36.1 (reporte del usuario: «funcionan pero en la app solo audio»): se añade
- * un host que NO está caído, pero cuyo vídeo es MPEG-2 — Android y ExoPlayer no
- * traen decodificador de MPEG-2 (ExoPlayer marca la pista como
- * NO_UNSUPPORTED_TYPE), así que en la app se oye el AAC y no se ve nada. Medido
- * en las 5 URLs del host: MPEG-2 en todas, H.264 en ninguna.
- *
  * QUÉ NO SE QUITA A PROPÓSITO, porque desde aquí no se puede distinguir «muerto» de
  * «bloqueado para mi IP», y borrarlos sería tirar canales que al usuario le funcionan:
  *   · los 403 de Bitel Perú y CDN geo-restringidos (America TV, Panamericana, TV Perú,
@@ -141,13 +135,6 @@ const HOST_CAIDO = {
   'streamx996.one': 'HTTP 404 en todas las URLs',
 };
 
-/** Host cuyo vídeo es MPEG-2: Android no lo decodifica, en la app sale solo audio.
- *  No está caído — funciona en VLC y en los televisores — pero en un móvil no se
- *  ve. Quitarlo hace que el canal caiga en su siguiente opción, que sí es H.264. */
-const HOST_SIN_VIDEO = {
-  '181.205.130.194:4000': 'vídeo MPEG-2: Android/ExoPlayer no lo decodifica, sale solo audio',
-};
-
 /** Rutas concretas que se fueron, en hosts que siguen vivos. */
 const RUTA_CAIDA = new Set([
   'http://200.10.30.241:8000/play/a049/index.m3u8',
@@ -168,9 +155,7 @@ function hostDe(u) {
 function urlCaida(u) {
   if (!u) return false;
   if (RUTA_CAIDA.has(u)) return true;
-  const h = hostDe(u);
-  return Object.prototype.hasOwnProperty.call(HOST_CAIDO, h)
-      || Object.prototype.hasOwnProperty.call(HOST_SIN_VIDEO, h);
+  return Object.prototype.hasOwnProperty.call(HOST_CAIDO, hostDe(u));
 }
 
 function opciones(servers, options) {
