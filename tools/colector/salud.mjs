@@ -106,10 +106,21 @@ export function tocaComprobar(registro, ahoraMs, opciones = {}) {
  *                                      mientras la primera pasada avanza
  *   · verificado como desconocido   -> igual que «nunca verificado»
  */
-export function publicable(registro, estabaEnCatalogo) {
+export function publicable(registro, estabaEnCatalogo, fallosParaRetirar = FALLOS_PARA_RETIRAR) {
   if (!registro) return !!estabaEnCatalogo;
   if (registro.estado === 'emite') return true;
-  if (registro.estado === 'no-emite') return false;
+  if (registro.estado === 'no-emite') {
+    // Un fallo DEFINITIVO (403/404/sin URL resuelta) retira al momento.
+    // Un fallo dudoso necesita DOS pasadas.
+    //
+    // Medido en el primer barrido real: el 42 % de los canales sin verificar no emite
+    // (184 de 436). Retirar al primer fallo dudoso parecía correcto, pero un canal
+    // puede fallar una vez por un corte de 30 s, por un cambio de CDN o porque Render
+    // resbaló, y estar perfectamente vivo. Con dos veredictos negativos en pasadas
+    // DISTINTAS (6 h de separación) la probabilidad de tirar uno bueno baja mucho.
+    if (registro.definitivo) return false;
+    return (registro.fallos || 0) < fallosParaRetirar;
+  }
   return !!estabaEnCatalogo;
 }
 
@@ -141,6 +152,13 @@ export function anotar(registro, resultado, ahoraMs) {
   }
 
   // no-emite
+  //
+  // `definitivo` distingue el fallo concluyente del dudoso:
+  //   · 403 / 404 / «sin URL resuelta» -> el canal ya no está. Un solo veredicto basta.
+  //   · 5xx, corte, tiempo agotado      -> puede ser un mal minuto. Hacen falta dos.
+  // Un 403 de DaddyLive es un evento terminado; no tiene sentido darle otra pasada.
+  const motivo = String(resultado.motivo || 'sin opciones').slice(0, 120);
+  const definitivo = /\b40[34]\b/.test(motivo) || /sin URL resuelta/i.test(motivo);
   return {
     estado: 'no-emite',
     at,
@@ -149,7 +167,8 @@ export function anotar(registro, resultado, ahoraMs) {
     ok: previo.ok || 0,
     opciones: 0,
     ms: resultado.ms || 0,
-    motivo: String(resultado.motivo || 'sin opciones').slice(0, 120),
+    motivo,
+    ...(definitivo ? { definitivo: true } : {}),
   };
 }
 
@@ -181,11 +200,28 @@ export async function verificarCanales(barrido, salud, ids, opciones = {}) {
   const guardar = opciones.guardar || null;
 
   // La cola: solo los que tocan, ordenados por lo que hace más tiempo que no se miran.
-  const cola = ids.filter((id) => tocaComprobar(canales[id], ahora, { horasVigencia, fallosParaRetirar }));
+  //
+  // `todo` = primera vuelta completa. Ver abajo por qué hace falta.
+  const todo = opciones.todo === true;
+  const cola = ids.filter((id) => todo || tocaComprobar(canales[id], ahora, { horasVigencia, fallosParaRetirar }));
+  // Prioridad de la cola, en este orden:
+  //   1. nunca vistos            -> no hay veredicto, es el hueco que hay que cerrar
+  //   2. vistos hace más tiempo   -> la vigencia de 36 h manda
+  //   3. retirados (no-emite con fallos) -> al final, solo si hay vuelta completa
+  // Ordenar solo por `at` metía los retirados (que también tienen `at`) entre los
+  // pendientes y gastaba el presupuesto en canales ya juzgados.
+  const peso = (id) => {
+    const r = canales[id];
+    if (!r || !r.at) return -1;
+    if (r.estado === 'no-emite' && (r.fallos || 0) >= fallosParaRetirar) return 1;
+    return 0;
+  };
   cola.sort((a, b) => {
+    const pa = peso(a), pb = peso(b);
+    if (pa !== pb) return pa - pb;
     const ta = canales[a] && canales[a].at ? Date.parse(canales[a].at) : 0;
     const tb = canales[b] && canales[b].at ? Date.parse(canales[b].at) : 0;
-    return ta - tb;   // los nunca vistos (0) primero
+    return ta - tb;
   });
 
   const cuenta = { comprobados: 0, emiten: 0, noEmiten: 0, desconocidos: 0 };
@@ -230,15 +266,53 @@ export async function verificarCanales(barrido, salud, ids, opciones = {}) {
     salud: { version: 1, at: new Date(ahora).toISOString(), canales },
     cola: cola.length,
     agotado,
+    // Lo que quedó sin mirar en esta pasada: es la deuda que arrastra la siguiente.
+    pendientes: Math.max(0, cola.length - cuenta.comprobados),
     ms: Date.now() - t0,
     ...cuenta,
   };
 }
 
+/**
+ * ¿Hace falta una vuelta COMPLETA de verificación?
+ *
+ * El caso real que obligó a esto: el catálogo tenía 11.638 canales y solo 1.538 con
+ * veredicto (13 %). Las pasadas normales no llenan ese hueco nunca, porque solo miran
+ * lo caducado, y con 36 h de vigencia y 10.000 pendientes la cola no da abasto: en una
+ * pasada de 13 min entraron 698 canales y el 86 % del catálogo siguió sin comprobar.
+ * Resultado: se publicaba «lo que consta que emite» + «lo que nunca se miró», que es
+ * justo lo que el filtro pretendía evitar.
+ *
+ * Cuando la cobertura baja de `coberturaMinima` (por defecto 90 %), la pasada se pone
+ * en modo completo: mira TODOS los candidatos, incluidos los ya retirados. Con la API
+ * en caliente son ~470 canales/min (medido), así que 10.000 son ~21 min: cabe de sobra
+ * en el presupuesto de 90 min.
+ */
+export function necesitaVueltaCompleta(salud, ids, coberturaMinima = 0.9) {
+  if (!ids.length) return false;
+  let conVeredicto = 0;
+  for (const id of ids) {
+    const r = salud.canales[id];
+    if (r && (r.estado === 'emite' || r.estado === 'no-emite')) conVeredicto++;
+  }
+  return conVeredicto / ids.length < coberturaMinima;
+}
+
+/** Cobertura actual del catálogo: 0 a 1. */
+export function cobertura(salud, ids) {
+  if (!ids.length) return 1;
+  let conVeredicto = 0;
+  for (const id of ids) {
+    const r = salud.canales[id];
+    if (r && (r.estado === 'emite' || r.estado === 'no-emite')) conVeredicto++;
+  }
+  return conVeredicto / ids.length;
+}
+
 /** Los ids publicables, en el orden que se les pase. */
-export function publicables(salud, ids, estabanEnCatalogo = null) {
+export function publicables(salud, ids, estabanEnCatalogo = null, fallosParaRetirar = FALLOS_PARA_RETIRAR) {
   const ayer = estabanEnCatalogo ? new Set(estabanEnCatalogo) : null;
-  return ids.filter((id) => publicable(salud.canales[id], ayer ? ayer.has(id) : true));
+  return ids.filter((id) => publicable(salud.canales[id], ayer ? ayer.has(id) : true, fallosParaRetirar));
 }
 
 /** Resumen para el log y para `estado/barrido.json`. */

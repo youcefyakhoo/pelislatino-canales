@@ -44,9 +44,14 @@ on:
         required: false
         default: '12000'
       presupuesto:
-        description: 'Minutos de verificación en esta pasada'
+        description: 'Minutos de verificación en esta pasada (la primera vuelta tarda ~25)'
         required: false
-        default: '30'
+        default: '90'
+      todo:
+        description: 'Vuelta completa: mirar TODOS los canales, también los ya retirados'
+        type: boolean
+        required: false
+        default: false
       sin_escribir:
         description: 'Solo probar (no escribe ni hace commit)'
         type: boolean
@@ -63,7 +68,10 @@ permissions:
 jobs:
   barrer:
     runs-on: ubuntu-latest
-    timeout-minutes: 70
+    # El presupuesto de verificación (90 min) + barrido (~2 min) + margen.
+    # Si el job se cortase a mitad, el estado se guarda cada 500 canales y la
+    # siguiente pasada sigue por donde iba; aun así, mejor no cortarlo.
+    timeout-minutes: 110
 
     steps:
       - uses: actions/checkout@v4
@@ -92,8 +100,11 @@ jobs:
         run: |
           ARGS="--minimo=${{ github.event.inputs.minimo || '2000' }}"
           ARGS="$ARGS --tope=${{ github.event.inputs.tope || '12000' }}"
-          ARGS="$ARGS --presupuesto=${{ github.event.inputs.presupuesto || '30' }}"
+          ARGS="$ARGS --presupuesto=${{ github.event.inputs.presupuesto || '90' }}"
           ARGS="$ARGS --concurrencia=6"
+          if [ "${{ github.event.inputs.todo }}" = "true" ]; then
+            ARGS="$ARGS --todo"
+          fi
           if [ "${{ github.event.inputs.sin_escribir }}" = "true" ]; then
             ARGS="$ARGS --ver"
           fi
@@ -105,7 +116,8 @@ jobs:
           {
             echo '### Colector de canales'
             echo '```'
-            tail -n 25 /tmp/colector.log 2>/dev/null || echo 'sin salida'
+            grep -E "cobertura|verificaci|canales   :|grupos|version" /tmp/colector.log 2>/dev/null | tail -n 12 \
+              || tail -n 25 /tmp/colector.log 2>/dev/null || echo 'sin salida'
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -122,6 +134,7 @@ jobs:
           git add version.json manifiesto.json scopes shards canales estado
           CAT=$(node -p "require('./version.json').total")
           OK=$(node -p "const s=require('./estado/salud.json'); Object.values(s.canales).filter(c=>c.estado==='emite').length" 2>/dev/null || echo '?')
-          git commit -m "catálogo: $CAT canales publicados · $OK verificados emitiendo"
+          COB=$(node -p "const b=require('./estado/barrido.json'); Math.round((b.cobertura||0)*100)+'%'" 2>/dev/null || echo '?')
+          git commit -m "catálogo: $CAT canales publicados · $OK verificando que emiten · cobertura $COB"
           git push
           echo 'Cloudflare Pages redespliega solo con el push.'

@@ -30,6 +30,7 @@ import { Barrido } from './barrido.mjs';
 import { construir, normalesDe } from './catalogo.mjs';
 import {
   leerSalud, verificarCanales, resumenSalud, publicables, anotar,
+  necesitaVueltaCompleta, cobertura,
 } from './salud.mjs';
 
 const RAIZ = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -57,6 +58,7 @@ function argumentos(argv) {
     escribir: true, minimo: MINIMO_POR_DEFECTO, tope: TOPE_POR_DEFECTO,
     api: undefined, codigo: undefined, tipos: undefined, log: true,
     presupuestoMin: 90, concurrencia: 6, verificar: true,
+    todo: false, coberturaMinima: 0.9,
   };
   for (const x of argv.slice(2)) {
     if (x === '--ver' || x === '--sin-escribir' || x === '--dry-run') a.escribir = false;
@@ -69,6 +71,8 @@ function argumentos(argv) {
     else if (x.startsWith('--presupuesto=')) a.presupuestoMin = Number(x.split('=')[1]) || 0;
     else if (x.startsWith('--concurrencia=')) a.concurrencia = Number(x.split('=')[1]) || 4;
     else if (x === '--sin-verificar') a.verificar = false;
+    else if (x === '--todo') a.todo = true;
+    else if (x.startsWith('--cobertura=')) a.coberturaMinima = Number(x.split('=')[1]) / 100;
   }
   return a;
 }
@@ -166,11 +170,24 @@ async function main() {
     // Los que desaparecieron del barrido pero estaban ayer también entran: un canal
     // puede salir de un tema y seguir emitiendo.
     const desaparecidos = idsDeAyer.filter((id) => !idsDelBarrido.includes(id));
-    const candidatos = [...new Set([
+    const porVerificar = [...new Set([
       ...idsDelBarrido.slice(0, op.tope || idsDelBarrido.length),
       ...desaparecidos,
     ])];
+    // Los candidatos de verdad son los que la app puede llegar a mostrar (el prefijo
+    // que se publica). La cobertura se mide sobre eso, no sobre los 19.000 del barrido.
+    const candidatos = op.tope ? porVerificar.slice(0, op.tope) : porVerificar;
+
+    // ── ¿vuelta completa? ──
+    // Si hay muchos canales sin veredicto, una pasada normal no cierra el hueco:
+    // solo mira lo caducado y la deuda crece. Ver `necesitaVueltaCompleta`.
+    const cob = cobertura(salud, candidatos);
+    const completa = op.todo || necesitaVueltaCompleta(salud, candidatos, op.coberturaMinima);
+    log(`cobertura: ${(cob * 100).toFixed(1)} % de ${candidatos.length} canales con veredicto` +
+        `${completa ? ' -> VUELTA COMPLETA' : ''}`);
+
     informe = await verificarCanales(barrido, salud, candidatos, {
+      todo: completa,
       concurrencia: op.concurrencia,
       presupuestoMs: op.presupuestoMin * 60_000,
       // Cada 500 canales se guarda el estado: si la pasada se corta a la mitad (o el
@@ -187,7 +204,12 @@ async function main() {
     salud = informe.salud;
     log(`verificación: ${informe.comprobados} canales en ${Math.round(informe.ms / 1000)} s` +
         ` · emiten ${informe.emiten} · no emiten ${informe.noEmiten} · sin respuesta ${informe.desconocidos}` +
-        `${informe.agotado ? ' · PRESUPUESTO AGOTADO (sigue en la próxima pasada)' : ''}`);
+        `${informe.agotado ? ` · PRESUPUESTO AGOTADO, quedan ${informe.pendientes} (sigue en la próxima pasada)` : ''}`);
+    const cobDespues = cobertura(salud, candidatos);
+    log(`cobertura tras la pasada: ${(cobDespues * 100).toFixed(1)} %` +
+        (cobDespues < op.coberturaMinima
+          ? ` — AVISO: por debajo del ${Math.round(op.coberturaMinima * 100)} %, la próxima va completa`
+          : ''));
     if (informe.comprobados && op.escribir) {
       await escribirTodo({ 'estado/salud.json': JSON.stringify(salud) }, RAIZ);
     }
@@ -283,6 +305,7 @@ async function main() {
     'estado/barrido.json': JSON.stringify({
       ...r, at: datos.at, api: datos.api,
       salud: resumenSalud(salud),
+      cobertura: Number(cobertura(salud, datos.canales.map((c) => c.id)).toFixed(4)),
       verificacion: informe && {
         comprobados: informe.comprobados, emiten: informe.emiten,
         noEmiten: informe.noEmiten, desconocidos: informe.desconectados ?? informe.desconocidos,

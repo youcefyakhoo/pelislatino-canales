@@ -524,12 +524,17 @@ test('verificar: un DNS roto del canal es veredicto; un timeout no', async () =>
   assert.equal((await barridoQueResponde({ opciones: [{ emite: false, error: cong }] }).verificar('x')).estado, 'desconocido');
 });
 
-test('un evento terminado (403 de DaddyLive) se retira tras dos pasadas', () => {
-  const caido = { estado: 'no-emite', fallos: 2, motivo: 'HTTP 403', at: new Date(T0).toISOString() };
-  assert.equal(publicable(caido, true), false, 'aunque estuviera en el catálogo de ayer');
-  const uno = { estado: 'no-emite', fallos: 1, motivo: 'HTTP 403', at: new Date(T0).toISOString() };
-  assert.equal(publicable(uno, true), false, 'un 403 ya es motivo para no publicarlo');
-  assert.equal(tocaComprobar(uno, T0 + HORA), true, 'pero se le da una segunda oportunidad');
+test('un evento terminado (403 de DaddyLive) se retira', () => {
+  // 403 = el canal ya no está: veredicto definitivo, se retira al momento.
+  const anotado = anotar({ estado: 'emite', fallos: 0, at: new Date(T0).toISOString() },
+    { estado: 'no-emite', motivo: 'HTTP 403' }, T0);
+  assert.equal(anotado.definitivo, true);
+  assert.equal(publicable(anotado, true), false, 'aunque estuviera en el catálogo de ayer');
+  // Un fallo DUDOSO (5xx, tiempo) sí da una segunda oportunidad.
+  const dudoso = anotar({ estado: 'emite', fallos: 0, at: new Date(T0).toISOString() },
+    { estado: 'no-emite', motivo: 'HTTP 503' }, T0);
+  assert.equal(publicable(dudoso, true), true, 'un 503 puede ser un mal minuto');
+  assert.equal(tocaComprobar(dudoso, T0 + HORA), true, 'se le da otra pasada');
 });
 
 test('los eventos (livematches) se ordenan al final del catálogo', async () => {
