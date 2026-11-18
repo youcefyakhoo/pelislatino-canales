@@ -134,7 +134,8 @@ async function main() {
     },
   });
 
-  log(`colector: ${barrido.api} · código ${barrido.codigo}`);
+  log(`colector: ${barrido.api} · código ${barrido.codigo}` +
+      `${op.escribir ? '' : ' · MODO PRUEBA: no se escribe nada'}`);
   const datos = await barrido.todo({
     tipos: op.tipos,
     progreso: ({ tipo, hechos, total }) => log(`  ${tipo}: ${hechos}/${total} temas`),
@@ -175,7 +176,10 @@ async function main() {
       // Cada 500 canales se guarda el estado: si la pasada se corta a la mitad (o el
       // runner muere), no se pierde lo comprobado. Es lo que permite pasadas de horas.
       guardarCada: 500,
-      guardar: (s) => escribirTodo({ 'estado/salud.json': JSON.stringify(s) }, RAIZ),
+      // En modo prueba (--ver) no se escribe NADA en disco, ni siquiera el estado.
+      guardar: op.escribir
+        ? (s) => escribirTodo({ 'estado/salud.json': JSON.stringify(s) }, RAIZ)
+        : null,
       log,
       progreso: ({ comprobados, emiten, noEmiten, pendientes }) =>
         log(`  verificados ${comprobados} (emiten ${emiten}, no ${noEmiten}) · faltan ${pendientes}`),
@@ -184,7 +188,7 @@ async function main() {
     log(`verificación: ${informe.comprobados} canales en ${Math.round(informe.ms / 1000)} s` +
         ` · emiten ${informe.emiten} · no emiten ${informe.noEmiten} · sin respuesta ${informe.desconocidos}` +
         `${informe.agotado ? ' · PRESUPUESTO AGOTADO (sigue en la próxima pasada)' : ''}`);
-    if (informe.comprobados) {
+    if (informe.comprobados && op.escribir) {
       await escribirTodo({ 'estado/salud.json': JSON.stringify(salud) }, RAIZ);
     }
   }

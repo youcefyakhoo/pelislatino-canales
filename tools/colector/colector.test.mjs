@@ -544,3 +544,49 @@ test('los eventos (livematches) se ordenan al final del catálogo', async () => 
   const ordenados = catalogoDePrueba(ids);
   assert.deepEqual(ordenados.map((c) => c.title), ['Bein S. 1', 'MBC Iraq', 'Evento A', 'Evento B']);
 });
+
+test('verificar: si /probar dice que emite, no se paga el viaje a /opciones', async () => {
+  const llamadas = [];
+  const b = new Barrido({
+    fetch: async (u) => {
+      llamadas.push(String(u));
+      return { ok: true, status: 200, text: async () => JSON.stringify({ canal: 'x', emite: true }) };
+    },
+    reloj: () => 0, dormir: async () => {}, ajustes: { reintentos: 0 },
+  });
+  const r = await b.verificar('live_tv_x');
+  assert.equal(r.estado, 'emite');
+  assert.equal(llamadas.length, 1, 'una sola petición');
+  assert.match(llamadas[0], /\/probar\//);
+});
+
+test('verificar: si /probar dice que no, se comprueban las demás opciones', async () => {
+  const llamadas = [];
+  let n = 0;
+  const b = new Barrido({
+    fetch: async (u) => {
+      llamadas.push(String(u));
+      n++;
+      const cuerpo = n === 1
+        ? { emite: false, detalle: { status: 403, error: 'HTTP 403' } }
+        : { opciones: [{ emite: false, error: 'HTTP 404' }, { emite: true }] };
+      return { ok: true, status: 200, text: async () => JSON.stringify(cuerpo) };
+    },
+    reloj: () => 0, dormir: async () => {}, ajustes: { reintentos: 0 },
+  });
+  const r = await b.verificar('live_tv_x');
+  assert.equal(r.estado, 'emite', 'una alternativa sí emite');
+  assert.equal(llamadas.length, 2);
+  assert.match(llamadas[1], /\/opciones\//);
+});
+
+test('verificar: /probar sin URL resuelta es un veredicto (sin opciones)', async () => {
+  let n = 0;
+  const b = new Barrido({
+    fetch: async () => { n++; return { ok: true, status: 200, text: async () => JSON.stringify({ emite: false, motivo: 'sin URL resuelta' }) }; },
+    reloj: () => 0, dormir: async () => {}, ajustes: { reintentos: 0 },
+  });
+  const r = await b.verificar('live_tv_x');
+  assert.equal(r.estado, 'no-emite');
+  assert.equal(n, 1, 'no hace falta preguntar más');
+});

@@ -315,9 +315,35 @@ export class Barrido {
    *   · 'desconocido'  no hubo respuesta (5xx, timeout, red). NO se toca lo que se sabía.
    */
   async verificar(idLive) {
-    const r = await this.pedir(`/opciones/${encodeURIComponent(this.codigo)}/${encodeURIComponent(idLive)}`);
+    // ── sonda rápida: /probar ──
+    //
+    // Resuelve la principal (y sus respaldos hasta dar con una que emita) y prueba
+    // ESE stream. Medido: 1,2–2,3 s frente a 1,4–11,5 s de /opciones, y coincidió en
+    // 10 de 10 canales que constaban como «emite». Es la que se usa primero.
+    const rapida = await this.pedir(`/probar/${encodeURIComponent(this.codigo)}/${encodeURIComponent(idLive)}`, {
+      tiempoMs: 30_000,
+    });
+    if (rapida.ok && rapida.datos && rapida.datos.emite === true) {
+      return { estado: 'emite', opciones: 1, total: 1, ms: rapida.ms, motivo: '' };
+    }
+    if (!rapida.ok) {
+      // 404 = el canal no existe. Lo demás (5xx, tiempo) no es veredicto.
+      if (rapida.estado === 404) return { estado: 'no-emite', opciones: 0, ms: rapida.ms, motivo: '404' };
+      return { estado: 'desconocido', opciones: 0, ms: rapida.ms, motivo: rapida.error };
+    }
+    // «sin URL resuelta» = Drama no da ni una opción: eso sí es un veredicto.
+    const motivoRapido = String((rapida.datos && rapida.datos.motivo) || '');
+    if (/sin URL resuelta/i.test(motivoRapido)) {
+      return { estado: 'no-emite', opciones: 0, total: 0, ms: rapida.ms, motivo: 'sin opciones' };
+    }
+
+    // ── sonda completa: /opciones ──
+    // La principal no emite, pero puede haber una alternativa que sí. Solo se paga
+    // este segundo viaje cuando la rápida ha dicho que no.
+    const r = await this.pedir(`/opciones/${encodeURIComponent(this.codigo)}/${encodeURIComponent(idLive)}`, {
+      tiempoMs: 40_000,
+    });
     if (!r.ok) {
-      // 404 = el canal ya no existe en Drama: eso es un veredicto, no un fallo.
       if (r.estado === 404) return { estado: 'no-emite', opciones: 0, ms: r.ms, motivo: '404' };
       return { estado: 'desconocido', opciones: 0, ms: r.ms, motivo: r.error };
     }
@@ -327,39 +353,28 @@ export class Barrido {
       return { estado: 'emite', opciones: emiten, total: ops.length, ms: r.ms, motivo: '' };
     }
 
-    // ── «no emite» tiene que ser un VEREDICTO, no un mal día ──
+    // «no emite» tiene que ser un VEREDICTO, no un mal día.
     //
     // La API puede contestar 200 y aun así no haber podido comprobar nada: su sonda
-    // pide el stream desde Render, y si Render está saturado (o el proveedor limita)
-    // el error es un 5xx, un 429 o un tiempo agotado. Eso NO prueba que el canal esté
-    // muerto. Medido: en una pasada con Render cargado se marcaron como muertos
-    // canales que la pasada anterior daban `emite` con 4 opciones.
-    //
-    // Solo hay veredicto cuando la respuesta es definitiva: 403/404/410, ninguna
-    // opción, o algo que carga pero no es un manifiesto.
-    const error = String((ops[0] && ops[0].error) || '');
-    const sinOpciones = ops.length === 0;
-
-    // ¿El fallo habla del canal o de nosotros?
+    // pide el stream desde Render, y si Render está saturado el error es un 5xx, un
+    // 429 o un tiempo agotado. Eso NO prueba que el canal esté muerto (medido: pasó
+    // con canales que la pasada anterior daban «emite» con 4 opciones).
     //
     //   · «no such host», «connection refused», «Invalid URL», 403/404/410
-    //       -> el canal (o su host) ya no está. Es un VEREDICTO.
-    //   · 5xx, 429, «timed out»
-    //       -> puede ser congestión de Render o del proveedor. NO es veredicto:
-    //          se deja como estaba (medido: canales con 4 opciones buenas aparecían
-    //          muertos cuando Render estaba cargado).
+    //       -> el canal (o su host) ya no está: VEREDICTO
+    //   · 5xx, 429, «timed out», «max retries»
+    //       -> puede ser congestión: NO es veredicto, se deja como estaba
+    const error = String((ops[0] && ops[0].error) || '');
+    const sinOpciones = ops.length === 0;
     const delCanal = /\b(403|404|410|408)\b|name or service not known|NameResolutionError|nodename nor servname|Connection refused|No route to host|Invalid URL|Caused by SSLError|SSL:/i.test(error);
-    // «Max retries exceeded» sin causa reconocible también cuenta como congestión: ante
-    // la duda no se retira un canal.
-    const congestión = /\b(429|5\d\d)\b|timed out|Timeout|ReadTimeout|ConnectTimeout|Max retries exceeded|temporar/i.test(error);
-    const transitorio = !delCanal && congestión;
+    const congestion = /\b(429|5\d\d)\b|timed out|Timeout|ReadTimeout|ConnectTimeout|Max retries exceeded|temporar/i.test(error);
+    const transitorio = !delCanal && congestion;
     return {
       estado: transitorio && !sinOpciones ? 'desconocido' : 'no-emite',
       opciones: 0,
       total: ops.length,
-      ms: r.ms,
+      ms: r.ms + rapida.ms,
       motivo: sinOpciones ? 'sin opciones' : (error || 'sin manifiesto'),
-      // Se guarda el motivo completo aparte para poder depurar sin ensuciar el estado.
       detalle: error.length > 120 ? error.slice(0, 400) : '',
     };
   }
