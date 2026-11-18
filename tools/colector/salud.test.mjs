@@ -135,16 +135,13 @@ test('la vuelta completa mira TAMBIÉN los ya retirados', async () => {
   assert.equal(con.emiten, 10);
 });
 
-test('lo nunca visto va PRIMERO en la cola, antes que lo caducado', async () => {
-  const salud = { canales: {
-    viejo1: reg('emite', 48), viejo2: reg('emite', 48),
-  } };
+test('la cola respeta el ORDEN del catálogo, que es lo que la app muestra', async () => {
+  // El alcance corto son los primeros 600: se verifican primero esos.
+  const todos = Array.from({ length: 40 }, (_, i) => 'c' + String(i).padStart(2, '0'));
   const orden = [];
   const b = { durmiendo: false, async verificar(id) { orden.push(id); return { estado: 'emite', ms: 1 }; } };
-  await verificarCanales(b, salud, ['viejo1', 'nuevo1', 'viejo2', 'nuevo2'], {
-    ahora: AHORA, concurrencia: 1,
-  });
-  assert.deepEqual(orden.slice(0, 2).sort(), ['nuevo1', 'nuevo2']);
+  await verificarCanales(b, { canales: {} }, todos, { ahora: AHORA, concurrencia: 1 });
+  assert.deepEqual(orden, todos);
 });
 
 test('el presupuesto corta la pasada y lo no mirado queda como pendiente', async () => {

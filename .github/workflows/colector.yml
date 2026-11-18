@@ -93,15 +93,16 @@ jobs:
         env:
           DRAMA_API: ${{ vars.DRAMA_API || 'https://dramalive-api-08th.onrender.com' }}
           DRAMA_CODIGO: ${{ vars.DRAMA_CODIGO || '232425' }}
-          # 6 es el punto dulce medido. A 12 Render se satura y baja a 28 canales/min
-          # frente a 89 a 8. Más concurrencia NO es más rápido con un plan gratuito.
-          CONCURRENCIA: '6'
+          # 10 es el punto medido el 2026-11-18 con canales NUNCA vistos (que tardan
+          # ~15 s cada uno, no 0,1 s): 78/min a 10 frente a 20/min a 6 y 56/min a 14.
+          # A 14 Render se satura y el ritmo CAE. Más concurrencia no es más rápido.
+          CONCURRENCIA: '10'
           ESPERA_MAX_MS: '180000'
         run: |
           ARGS="--minimo=${{ github.event.inputs.minimo || '2000' }}"
           ARGS="$ARGS --tope=${{ github.event.inputs.tope || '12000' }}"
           ARGS="$ARGS --presupuesto=${{ github.event.inputs.presupuesto || '90' }}"
-          ARGS="$ARGS --concurrencia=6"
+          ARGS="$ARGS --concurrencia=10"
           if [ "${{ github.event.inputs.todo }}" = "true" ]; then
             ARGS="$ARGS --todo"
           fi

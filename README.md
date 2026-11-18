@@ -94,6 +94,33 @@ pequeño en uno solo.
 3. Los shards (`/shards/<slug>.json`) quedan para el refresco selectivo: bajar
    solo los grupos que cambiaron.
 
+## De dónde sale cada canal (esto es lo que hay que entender)
+
+El catálogo tiene **dos fuentes**, y no son intercambiables:
+
+| | fuente | cuántos | cómo viaja | quién lo resuelve |
+|---|---|---|---|---|
+| **Drama** | tu API (`dramalive-api-08th.onrender.com`) + `cesopppplop` como espejo | ~11.600 | `dramalive://play?id_live=…` | la app, al pulsar: pide `/p/{cod}/{id}/{n}.m3u8` a tu API |
+| **externa** | `belkaperu/belkafut` → `data_unificado.json` | ~460 canales (677 servidores) | URL `http(s)` directa | el reproductor, tal cual |
+
+**Por qué hay dos.** Drama no tiene todo. HBO, Cartoon Network, CNN, BBC o ESPN
+no están en Drama: salen de un listado aparte con URLs directas (un CDN, una IP de
+un operador, o una página `.php`/`.html` que hay que resolver). Comprobado: de una
+muestra de 24 de esos canales, **los 24 emitían**. No son relleno.
+
+**El error que había.** El colector de la primera versión solo barría Drama, así
+que los 460 canales externos desaparecieron del catálogo: de 691 servidores
+externos, **0 quedaron publicados**. Ahora `tools/colector/fuentes.mjs` los lee,
+los comprueba uno a uno (`#EXTM3U` obligatorio en una lista: un 200 de una página
+de error no cuenta) y los coloca **repartidos por grupos**, no al final del
+catálogo. Esto último importa: la app recorta la lista **plana** al tope del
+alcance (corto = 600) y luego pinta una pestaña por categoría, así que un canal
+puesto en el puesto 12.001 no lo ve nadie con el alcance corto.
+
+**La app además trae un catálogo empaquetado** (`app/src/main/assets/catalogo/`,
+5,2 MB, 15.299 canales) que solo se usa como semilla la primera vez, cuando no hay
+nada en disco; en segundo plano se sustituye por el remoto.
+
 ## Refresco
 
 ### El colector: los canales que FUNCIONAN

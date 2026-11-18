@@ -6,6 +6,8 @@
  *   node tools/colector/index.mjs --ver           # barre y solo enseña el resumen
  *   node tools/colector/index.mjs --sin-escribir  # igual que --ver
  *   node tools/colector/index.mjs --minimo=3000   # no publica si trae menos
+ *   node tools/colector/index.mjs --sin-externos  # sin la fuente que no es Drama
+ *   node tools/colector/index.mjs --todo          # vuelta completa de verificación
  *   node tools/colector/index.mjs --api=https://otro.onrender.com
  *
  * Lo lanza la GitHub Action (`.github/workflows/colector.yml`) de madrugada. También
@@ -28,6 +30,9 @@ import { fileURLToPath } from 'node:url';
 
 import { Barrido } from './barrido.mjs';
 import { construir, normalesDe } from './catalogo.mjs';
+import {
+  EXTERNA_POR_DEFECTO, canalesExternos, probarExterno, colocarExternos,
+} from './fuentes.mjs';
 import {
   leerSalud, verificarCanales, resumenSalud, publicables, anotar,
   necesitaVueltaCompleta, cobertura,
@@ -57,8 +62,11 @@ function argumentos(argv) {
   const a = {
     escribir: true, minimo: MINIMO_POR_DEFECTO, tope: TOPE_POR_DEFECTO,
     api: undefined, codigo: undefined, tipos: undefined, log: true,
-    presupuestoMin: 90, concurrencia: 6, verificar: true,
+    presupuestoMin: 90, concurrencia: 10, verificar: true,
     todo: false, coberturaMinima: 0.9,
+    // La fuente externa (belkaperu) va activada: son los ~460 canales que NO son de
+    // Drama y que se estaban perdiendo. `--sin-externos` la apaga.
+    externos: true, fuenteExterna: undefined,
   };
   for (const x of argv.slice(2)) {
     if (x === '--ver' || x === '--sin-escribir' || x === '--dry-run') a.escribir = false;
@@ -72,6 +80,8 @@ function argumentos(argv) {
     else if (x.startsWith('--concurrencia=')) a.concurrencia = Number(x.split('=')[1]) || 4;
     else if (x === '--sin-verificar') a.verificar = false;
     else if (x === '--todo') a.todo = true;
+    else if (x === '--sin-externos') a.externos = false;
+    else if (x.startsWith('--fuente-externa=')) a.fuenteExterna = x.slice(16);
     else if (x.startsWith('--cobertura=')) a.coberturaMinima = Number(x.split('=')[1]) / 100;
   }
   return a;
@@ -245,6 +255,76 @@ async function main() {
     log(`  siguen emitiendo (se conservan): ${conservados.size} · se retiran: ${desaparecen.length - conservados.size}`);
   }
 
+  // ─────────────────── LA SEGUNDA FUENTE (NO Drama) ───────────────────
+  //
+  // Drama no tiene todo. Los ~460 canales que no son de Drama (HBO, Cartoon Network,
+  // CNN, BBC…) salen de belkaperu/belkafut como URLs http(s) directas, y el colector
+  // los estaba tirando: medido, de 691 servidores externos 0 quedaban publicados.
+  // Se añaden aquí, con su propia comprobación (no la de Drama).
+  let externos = [];
+  const rutaExternos = join(RAIZ, 'estado/externos.json');
+  let saludExt = (await leerJson(rutaExternos)) || { version: 1, canales: {} };
+  if (op.externos) {
+    const fuente = op.fuenteExterna || process.env.FUENTE_EXTERNA || EXTERNA_POR_DEFECTO;
+    log(`fuente externa: ${fuente}`);
+    try {
+      const ctl = new AbortController();
+      const corte = setTimeout(() => ctl.abort(), 60_000);
+      const r = await fetch(fuente, { signal: ctl.signal, headers: { 'User-Agent': 'PelisLatino-colector/1.0' } });
+      clearTimeout(corte);
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const json = await r.json();
+      externos = canalesExternos(json);
+      log(`  ${externos.length} canales externos (URLs directas, no Drama)`);
+    } catch (e) {
+      // Si la fuente externa falla, NO se pierden los que ya estaban publicados: se
+      // recuperan del catálogo de ayer, que los trae como canales sin id_live.
+      log(`  aviso: la fuente externa no se pudo leer (${e.message}); se conservan los de ayer`);
+      externos = deAyer
+        .filter((p) => !p.id && p.urls.length)
+        .map((p) => ({
+          id: 'ext_' + p.urls[0], nombre: p.titulo, logo: p.imagen,
+          tema: p.grupo, tipo: 'externo', url: p.urls[0], externo: true,
+        }));
+      log(`  recuperados de ayer: ${externos.length}`);
+    }
+
+    // Verificación: solo los que no tengan un veredicto reciente. Aquí no hay API a la
+    // que preguntar, se pide el stream. Se prueban pocos a la vez: los servidores son
+    // de terceros y algunos son viejos.
+    const ahora = Date.now();
+    const VIGENCIA_EXT = 12 * 3600_000;
+    const aProbar = externos.filter((c) => {
+      const s = saludExt.canales[c.id];
+      return !s || !s.at || ahora - Date.parse(s.at) > VIGENCIA_EXT || s.estado === 'desconocido';
+    });
+    if (aProbar.length) {
+      log(`  comprobando ${aProbar.length} externos…`);
+      let hechos = 0;
+      await barrido.enParalelo(aProbar, async (c) => {
+        const r = await probarExterno(c.url, { tiempoMs: 12_000 });
+        saludExt.canales[c.id] = { estado: r.estado, at: new Date().toISOString(), motivo: r.motivo, ms: r.ms };
+        if (++hechos % 100 === 0) log(`    ${hechos}/${aProbar.length}`);
+      }, 6);
+    }
+    // Qué se publica: emite, o desconocido (no se castiga un servidor lento), o el
+    // primer fallo de un canal que venía funcionando. 403/404 repetido = fuera.
+    externos = externos.filter((c) => {
+      const s = saludExt.canales[c.id];
+      if (!s) return true;
+      if (s.estado === 'emite') return true;
+      if (s.estado === 'desconocido') return true;
+      // no-emite: se cae si el motivo es definitivo (40x / servidor caído).
+      return !/40[34]|servidor caído|sin #EXTM3U/i.test(s.motivo || '');
+    });
+    const cuenta = externos.length;
+    const vivos = externos.filter((c) => (saludExt.canales[c.id] || {}).estado === 'emite').length;
+    log(`  externos publicados: ${cuenta} (${vivos} verificados emitiendo)`);
+    if (op.escribir) {
+      await escribirTodo({ 'estado/externos.json': JSON.stringify(saludExt) }, RAIZ);
+    }
+  }
+
   // ── el filtro de verdad: solo lo que consta que emite ──
   // Un canal nunca comprobado se queda si ya estaba publicado; si no, la app se
   // quedaría vacía mientras avanza la primera pasada (tarda días en verse todo).
@@ -252,6 +332,16 @@ async function main() {
   const datosPublicables = { ...datos, canales: datos.canales.filter((c) => sanos.has(c.id)) };
   const deAyerPublicables = deAyer.filter((p) => !p.id || sanos.has(p.id));
   log(`se publican ${datosPublicables.canales.length} de ${datos.canales.length} canales del barrido`);
+
+  // Los externos se meten en su grupo, al final de él, para que caigan dentro de los
+  // alcances (que son prefijos: corto = 600).
+  if (externos.length) {
+    // Repartidos por grupos, no pegados al final: el alcance corto es un prefijo de
+    // 600 y el catálogo de Drama tiene ~1.000 por grupo, así que al final no se vería
+    // ninguno. Ver `colocarExternos`.
+    datosPublicables.canales = colocarExternos(datosPublicables.canales, externos, { tope: op.tope });
+    log(`catálogo con externos: ${datosPublicables.canales.length} canales`);
+  }
 
   let salida;
   try {
@@ -306,6 +396,8 @@ async function main() {
       ...r, at: datos.at, api: datos.api,
       salud: resumenSalud(salud),
       cobertura: Number(cobertura(salud, datos.canales.map((c) => c.id)).toFixed(4)),
+      externos: externos.length,
+      externosVivos: externos.filter((c) => (saludExt.canales[c.id] || {}).estado === 'emite').length,
       verificacion: informe && {
         comprobados: informe.comprobados, emiten: informe.emiten,
         noEmiten: informe.noEmiten, desconocidos: informe.desconectados ?? informe.desconocidos,

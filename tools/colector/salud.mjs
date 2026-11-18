@@ -204,25 +204,22 @@ export async function verificarCanales(barrido, salud, ids, opciones = {}) {
   // `todo` = primera vuelta completa. Ver abajo por qué hace falta.
   const todo = opciones.todo === true;
   const cola = ids.filter((id) => todo || tocaComprobar(canales[id], ahora, { horasVigencia, fallosParaRetirar }));
-  // Prioridad de la cola, en este orden:
-  //   1. nunca vistos            -> no hay veredicto, es el hueco que hay que cerrar
-  //   2. vistos hace más tiempo   -> la vigencia de 36 h manda
-  //   3. retirados (no-emite con fallos) -> al final, solo si hay vuelta completa
-  // Ordenar solo por `at` metía los retirados (que también tienen `at`) entre los
-  // pendientes y gastaba el presupuesto en canales ya juzgados.
-  const peso = (id) => {
-    const r = canales[id];
-    if (!r || !r.at) return -1;
-    if (r.estado === 'no-emite' && (r.fallos || 0) >= fallosParaRetirar) return 1;
-    return 0;
-  };
-  cola.sort((a, b) => {
-    const pa = peso(a), pb = peso(b);
-    if (pa !== pb) return pa - pb;
-    const ta = canales[a] && canales[a].at ? Date.parse(canales[a].at) : 0;
-    const tb = canales[b] && canales[b].at ? Date.parse(canales[b].at) : 0;
-    return ta - tb;
-  });
+  // ── ORDEN DE LA COLA: el del catálogo, de principio a fin ──
+  //
+  // Medido el 2026-11-18: verificar un canal NUNCA mirado cuesta ~15 s (mediana), no
+  // los 0,1 s de uno ya resuelto. O sea que una pasada de 90 min no llega ni a 2.000
+  // canales de los 12.000. Con ese presupuesto, el orden decide qué se ve.
+  //
+  // Y lo que se ve es un PREFIJO: el alcance corto son los 600 primeros del catálogo,
+  // latam los 2.500. Por eso se recorre el catálogo EN SU ORDEN: los del alcance corto
+  // quedan verificados en la primera media hora, y cada pasada avanza un tramo. Antes
+  // se ordenaba por antigüedad y se verificaba un canchal al azar de cada grupo, que
+  // no mejora la experiencia de nadie.
+  //
+  // El orden de `ids` es el del catálogo publicado (lo pasa index.mjs).
+  const posicion = new Map();
+  ids.forEach((id, i) => posicion.set(id, i));
+  cola.sort((a, b) => (posicion.get(a) || 0) - (posicion.get(b) || 0));
 
   const cuenta = { comprobados: 0, emiten: 0, noEmiten: 0, desconocidos: 0 };
   let agotado = false;
