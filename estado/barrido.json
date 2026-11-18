@@ -1,0 +1,29 @@
+{
+  "api": "https://dramalive-api-08th.onrender.com",
+  "at": "2026-11-18T20:13:43.560Z",
+  "canales": 11642,
+  "nuevos": 0,
+  "quitados": 0,
+  "sinId": 0,
+  "recortados": 0,
+  "grupos": 155,
+  "shards": 203,
+  "version": "05c4bab0",
+  "despertarMs": 139,
+  "msBarrido": 93497,
+  "fallos": [],
+  "salud": {
+    "canales": 2930,
+    "emiten": 1538,
+    "caidos": 878,
+    "nunca": 514
+  },
+  "verificacion": {
+    "comprobados": 251,
+    "emiten": 2,
+    "noEmiten": 2,
+    "desconocidos": 247,
+    "agotado": true,
+    "segundos": 184
+  }
+}

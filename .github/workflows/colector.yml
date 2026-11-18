@@ -1,0 +1,127 @@
+name: Colector de canales (Drama Live)
+
+# QUÉ HACE
+# --------
+# Cada 6 horas: barre la API de Drama, comprueba qué canales EMITEN de verdad y
+# republica el catálogo con solo los que funcionan. Cloudflare Pages lo sirve
+# estático al hacer push.
+#
+# POR QUÉ AQUÍ Y NO EN UN WORKER
+# ------------------------------
+# Barrer 265 temas son ~2 min, y verificar canales cuesta ~0,6 s cada uno contra la
+# API (medido). Un Worker tiene tope de CPU y de subpeticiones: esto no cabe. Aquí no
+# hay tope de tiempo, así que se hace con calma. Cloudflare solo sirve el resultado.
+#
+# POR QUÉ NO SE VERIFICA TODO EN CADA PASADA
+# ------------------------------------------
+# Son ~19.500 canales × 0,6 s ≈ 3 h por vuelta completa. No hace falta: cada pasada
+# mira los 2.800 más antiguos (30 min), así que en ~36 h se ha repasado todo y cada
+# canal tiene un veredicto con menos de 36 h de antigüedad. Si una pasada se corta,
+# el estado se guarda cada 500 canales y la siguiente sigue por donde iba.
+#
+# CUÁNDO NO PUBLICA
+# -----------------
+# · si Render no despierta             -> se queda el catálogo anterior
+# · si el barrido trae muy poco        -> idem
+# · si la huella no cambió             -> no hay commit (ni uno vacío cada 6 h)
+
+on:
+  schedule:
+    - cron: '23 */6 * * *'   # 00:23, 06:23, 12:23, 18:23 UTC
+  workflow_dispatch:
+    inputs:
+      vaciar_salud:
+        description: 'Recomprobar TODO otra vez (borra el estado de salud)'
+        type: boolean
+        required: false
+        default: false
+      minimo:
+        description: 'Mínimo de canales para publicar'
+        required: false
+        default: '2000'
+      tope:
+        description: 'Máximo de canales a publicar'
+        required: false
+        default: '12000'
+      presupuesto:
+        description: 'Minutos de verificación en esta pasada'
+        required: false
+        default: '30'
+      sin_escribir:
+        description: 'Solo probar (no escribe ni hace commit)'
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: colector-canales
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  barrer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Si el colector está roto, no se toca el catálogo.
+      - name: Pruebas del colector
+        run: node --test tools/colector/
+
+      - name: Vaciar el estado de salud (opcional)
+        if: github.event.inputs.vaciar_salud == 'true'
+        run: rm -f estado/salud.json
+
+      - name: Barrer, verificar y publicar
+        id: barrer
+        env:
+          DRAMA_API: ${{ vars.DRAMA_API || 'https://dramalive-api-08th.onrender.com' }}
+          DRAMA_CODIGO: ${{ vars.DRAMA_CODIGO || '232425' }}
+          # 6 es el punto dulce medido. A 12 Render se satura y baja a 28 canales/min
+          # frente a 89 a 8. Más concurrencia NO es más rápido con un plan gratuito.
+          CONCURRENCIA: '6'
+          ESPERA_MAX_MS: '180000'
+        run: |
+          ARGS="--minimo=${{ github.event.inputs.minimo || '2000' }}"
+          ARGS="$ARGS --tope=${{ github.event.inputs.tope || '12000' }}"
+          ARGS="$ARGS --presupuesto=${{ github.event.inputs.presupuesto || '30' }}"
+          ARGS="$ARGS --concurrencia=6"
+          if [ "${{ github.event.inputs.sin_escribir }}" = "true" ]; then
+            ARGS="$ARGS --ver"
+          fi
+          node tools/colector/index.mjs $ARGS | tee /tmp/colector.log
+
+      - name: Resumen en el run
+        if: always()
+        run: |
+          {
+            echo '### Colector de canales'
+            echo '```'
+            tail -n 25 /tmp/colector.log 2>/dev/null || echo 'sin salida'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Se publica SIEMPRE que cambie el estado de salud, aunque el catálogo no cambie:
+      # saber que un canal se cayó es justo lo que hace falta para retirarlo.
+      - name: Commit y push
+        run: |
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "sin cambios: no hay commit"
+            exit 0
+          fi
+          git config user.name  'colector-pelislatino'
+          git config user.email 'colector@users.noreply.github.com'
+          git add version.json manifiesto.json scopes shards canales estado
+          CAT=$(node -p "require('./version.json').total")
+          OK=$(node -p "const s=require('./estado/salud.json'); Object.values(s.canales).filter(c=>c.estado==='emite').length" 2>/dev/null || echo '?')
+          git commit -m "catálogo: $CAT canales publicados · $OK verificados emitiendo"
+          git push
+          echo 'Cloudflare Pages redespliega solo con el push.'

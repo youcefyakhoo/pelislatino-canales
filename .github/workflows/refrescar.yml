@@ -1,15 +1,21 @@
-name: Refrescar el catálogo
+name: Refrescar el catálogo (LEGADO — fuentes de terceros)
 
-# Regenera los JSON estáticos (shards, scopes, manifiesto) desde las fuentes de
-# origen y hace commit si algo cambió. Cloudflare Pages redespliega solo.
+# ⚠️ ESTO YA NO ES EL CAMINO NORMAL. NO SE EJECUTA SOLO.
 #
-# SIN ESTO: los JSON del repo son una foto. La app se enteraría de los canales
-# nuevos solo cuando alguien ejecutara `node tools/generar.js` a mano.
+# Este workflow regenera el catálogo desde `data_unificado.json` (belkaperu) y
+# `canales-compacto.json` (cesopppplop): fuentes de TERCEROS, sin comprobar qué
+# canales emiten. Escribía los mismos ficheros que el colector, así que si corría
+# después lo pisaba todo.
+#
+# El camino bueno es `.github/workflows/colector.yml`: barre tu API, verifica qué
+# canales emiten y publica solo esos.
+#
+# Se queda aquí, y solo a mano, como plan B si algún día la API no está disponible:
+# sirve para volver al catálogo de terceros tal cual. Si lo lanzas, el colector lo
+# corregirá en la siguiente pasada.
 
 on:
-  schedule:
-    - cron: '17 5 * * *'      # todos los días a las 05:17 UTC
-  workflow_dispatch:           # y a mano cuando haga falta
+  workflow_dispatch:           # SOLO a mano. Sin cron, a propósito.
 
 permissions:
   contents: write
@@ -23,6 +29,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      - name: Aviso
+        run: |
+          echo "::warning::Estás publicando el catálogo de TERCEROS sin verificar. El camino normal es el workflow «Colector de canales»."
 
       - name: Generar el catálogo
         run: node tools/generar.js

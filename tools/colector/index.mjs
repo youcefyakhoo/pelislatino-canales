@@ -1,0 +1,297 @@
+#!/usr/bin/env node
+/**
+ * COLECTOR — refresca el catálogo de canales desde la API propia de Drama Live.
+ *
+ *   node tools/colector/index.mjs                 # barre y escribe
+ *   node tools/colector/index.mjs --ver           # barre y solo enseña el resumen
+ *   node tools/colector/index.mjs --sin-escribir  # igual que --ver
+ *   node tools/colector/index.mjs --minimo=3000   # no publica si trae menos
+ *   node tools/colector/index.mjs --api=https://otro.onrender.com
+ *
+ * Lo lanza la GitHub Action (`.github/workflows/colector.yml`) de madrugada. También
+ * se puede probar en local sin tocar nada: por defecto NO escribe.
+ *
+ * Qué escribe (lo mismo que ya servía el repo, sin cambiar el contrato de la app):
+ *   version.json · manifiesto.json · scopes/{corto,latam,global}.json
+ *   shards/<slug>.json · canales/pequena.json · estado/barrido.json
+ *
+ * Reglas de seguridad, en este orden:
+ *   1. Si Render no despierta            -> no se escribe NADA (sale con código 1).
+ *   2. Si el barrido trae menos del mínimo -> no se escribe NADA.
+ *   3. Si la huella no cambió            -> no se escribe NADA (no hay commit vacío).
+ *   4. Todo se escribe primero en temporal y se renombra: nunca queda un JSON a medias.
+ */
+
+import { mkdir, readdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { Barrido } from './barrido.mjs';
+import { construir, normalesDe } from './catalogo.mjs';
+import {
+  leerSalud, verificarCanales, resumenSalud, publicables, anotar,
+} from './salud.mjs';
+
+const RAIZ = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+/** Un barrido tan corto no es un catálogo: es un fallo disfrazado. */
+const MINIMO_POR_DEFECTO = 2_000;
+
+/**
+ * Techo de canales publicados = el máximo que la app muestra (`TOPE_GLOBAL` = 12.000).
+ *
+ * Ni uno más, por dos razones medidas:
+ *   · peso: el catálogo va en git y cada 1.000 canales son ~230 KB en cada scope
+ *   · calidad: a partir del puesto ~12.000 del barrido los canales están muertos
+ *     (medido: del 0 al 12.000 emiten el 100 %; por detrás, casi ninguno)
+ *
+ * Publicar más de lo que la app enseña solo engorda el repo con canales que nadie ve.
+ */
+const TOPE_POR_DEFECTO = 12_000;
+
+/** Si de golpe se pierde más de este % respecto a lo publicado ayer, no se publica. */
+const PERDER_MAX = 0.5;
+
+function argumentos(argv) {
+  const a = {
+    escribir: true, minimo: MINIMO_POR_DEFECTO, tope: TOPE_POR_DEFECTO,
+    api: undefined, codigo: undefined, tipos: undefined, log: true,
+    presupuestoMin: 90, concurrencia: 6, verificar: true,
+  };
+  for (const x of argv.slice(2)) {
+    if (x === '--ver' || x === '--sin-escribir' || x === '--dry-run') a.escribir = false;
+    else if (x === '--silencio') a.log = false;
+    else if (x.startsWith('--minimo=')) a.minimo = Number(x.split('=')[1]) || 0;
+    else if (x.startsWith('--tope=')) a.tope = Number(x.split('=')[1]) || 0;
+    else if (x.startsWith('--api=')) a.api = x.slice(6);
+    else if (x.startsWith('--codigo=')) a.codigo = x.slice(9);
+    else if (x.startsWith('--tipos=')) a.tipos = x.slice(8).split(',').map((s) => s.trim()).filter(Boolean);
+    else if (x.startsWith('--presupuesto=')) a.presupuestoMin = Number(x.split('=')[1]) || 0;
+    else if (x.startsWith('--concurrencia=')) a.concurrencia = Number(x.split('=')[1]) || 4;
+    else if (x === '--sin-verificar') a.verificar = false;
+  }
+  return a;
+}
+
+/** Escribe varios ficheros: primero a `.tmp`, luego `rename` (atómico). */
+async function escribirTodo(ficheros, raiz) {
+  let bytes = 0;
+  for (const [ruta, contenido] of Object.entries(ficheros)) {
+    const destino = join(raiz, ruta);
+    await mkdir(dirname(destino), { recursive: true });
+    const tmp = destino + '.tmp';
+    await writeFile(tmp, contenido);
+    await rename(tmp, destino);
+    bytes += contenido.length;
+  }
+  return bytes;
+}
+
+/**
+ * Borra los shards que ya no referencia el manifiesto.
+ *
+ * Sin esto, cada barrido deja atrás los shards de grupos que cambiaron de nombre o
+ * desaparecieron (medido: 56 huérfanos en el primer run, 281 ficheros para 225
+ * shards). No rompen nada, pero engordan el repo para siempre y confunden al depurar.
+ */
+async function limpiarShards(raiz, vigentes) {
+  let borrados = 0;
+  try {
+    for (const f of await readdir(join(raiz, 'shards'))) {
+      if (!f.endsWith('.json')) continue;
+      if (!vigentes.has(f)) { await unlink(join(raiz, 'shards', f)); borrados++; }
+    }
+  } catch { /* no existe shards/ todavía */ }
+  return borrados;
+}
+
+/** Lee un JSON; si no existe o está roto, devuelve null (nunca lanza). */
+async function leerJson(ruta) {
+  try { return JSON.parse(await readFile(ruta, 'utf8')); } catch { return null; }
+}
+
+/** Los canales que ya están publicados, para conservar su orden. */
+async function previos(raiz) {
+  for (const ruta of ['scopes/global.json', 'canales/pequena.json']) {
+    const j = await leerJson(join(raiz, ruta));
+    const lista = normalesDe(j);
+    if (lista.length) return lista;
+  }
+  return [];
+}
+
+async function main() {
+  const op = argumentos(process.argv);
+  const log = op.log ? (...x) => console.log(...x) : () => {};
+
+  const barrido = new Barrido({
+    api: op.api,
+    codigo: op.codigo,
+    log,
+    ajustes: {
+      concurrencia: Number(process.env.CONCURRENCIA || 6),
+      esperaMaxMs: Number(process.env.ESPERA_MAX_MS || 180_000),
+    },
+  });
+
+  log(`colector: ${barrido.api} · código ${barrido.codigo}`);
+  const datos = await barrido.todo({
+    tipos: op.tipos,
+    progreso: ({ tipo, hechos, total }) => log(`  ${tipo}: ${hechos}/${total} temas`),
+  });
+
+  const deAyer = await previos(RAIZ);
+  log(`publicado ayer: ${deAyer.length} canales · barrido: ${datos.canales.length}`);
+
+  // ────────────────────────── LA SALUD ──────────────────────────
+  // Aquí se decide qué canales FUNCIONAN. El barrido dice qué existe; esto dice qué
+  // emite, y solo eso se publica. Ver tools/colector/salud.mjs.
+  const rutaSalud = join(RAIZ, 'estado/salud.json');
+  let salud = leerSalud(await leerJson(rutaSalud));
+  const idsDelBarrido = datos.canales.map((c) => c.id);
+  const idsDeAyer = deAyer.map((p) => p.id).filter(Boolean);
+
+  let informe = null;
+  if (op.verificar) {
+    const antes = resumenSalud(salud);
+    log(`salud guardada: ${antes.emiten} emiten · ${antes.caidos} caídos · ${antes.nunca} sin comprobar`);
+    // QUÉ SE COMPRUEBA Y QUÉ NO.
+    //
+    // El barrido trae 19.568 canales, pero la app nunca enseña más de 12.000
+    // (`AutoCanales.TOPE_GLOBAL`). Verificar los 4.500 del final es gastar 40 min por
+    // pasada en canales que nadie va a ver. Se verifica hasta `tope` (15.000), que es
+    // el prefijo que se publica y sobra para el alcance global.
+    //
+    // Los que desaparecieron del barrido pero estaban ayer también entran: un canal
+    // puede salir de un tema y seguir emitiendo.
+    const desaparecidos = idsDeAyer.filter((id) => !idsDelBarrido.includes(id));
+    const candidatos = [...new Set([
+      ...idsDelBarrido.slice(0, op.tope || idsDelBarrido.length),
+      ...desaparecidos,
+    ])];
+    informe = await verificarCanales(barrido, salud, candidatos, {
+      concurrencia: op.concurrencia,
+      presupuestoMs: op.presupuestoMin * 60_000,
+      // Cada 500 canales se guarda el estado: si la pasada se corta a la mitad (o el
+      // runner muere), no se pierde lo comprobado. Es lo que permite pasadas de horas.
+      guardarCada: 500,
+      guardar: (s) => escribirTodo({ 'estado/salud.json': JSON.stringify(s) }, RAIZ),
+      log,
+      progreso: ({ comprobados, emiten, noEmiten, pendientes }) =>
+        log(`  verificados ${comprobados} (emiten ${emiten}, no ${noEmiten}) · faltan ${pendientes}`),
+    });
+    salud = informe.salud;
+    log(`verificación: ${informe.comprobados} canales en ${Math.round(informe.ms / 1000)} s` +
+        ` · emiten ${informe.emiten} · no emiten ${informe.noEmiten} · sin respuesta ${informe.desconocidos}` +
+        `${informe.agotado ? ' · PRESUPUESTO AGOTADO (sigue en la próxima pasada)' : ''}`);
+    if (informe.comprobados) {
+      await escribirTodo({ 'estado/salud.json': JSON.stringify(salud) }, RAIZ);
+    }
+  }
+
+  // ── los que desaparecen del barrido: ¿siguen emitiendo? ──
+  //
+  // No se borra un canal solo porque Drama deje de listarlo. Pero la comprobación
+  // tampoco se hace con un HEAD al proxy: medido, ese HEAD da 200 en canales que la
+  // API marca muertos (dice «resolví», no «emite»). Se pregunta a `/opciones`, que
+  // descarga el manifiesto de verdad, siempre que la salud no lo sepa ya.
+  const salen = new Set(datos.canales.map((c) => c.id));
+  const desaparecen = deAyer
+    .filter((p) => p.id && !salen.has(p.id))
+    .map((p) => p.id);
+  const conservados = new Set();
+  for (const id of desaparecen) {
+    if (salud.canales[id] && salud.canales[id].estado === 'emite') conservados.add(id);
+  }
+  const sinVeredicto = desaparecen.filter((id) => !conservados.has(id) && !salud.canales[id]);
+  if (sinVeredicto.length) {
+    log(`comprobando ${sinVeredicto.length} canales que desaparecen del barrido…`);
+    let n = 0;
+    const nota = await barrido.enParalelo(sinVeredicto.slice(0, 400), async (id) => {
+      const r = await barrido.verificar(id);
+      if (r.estado !== 'desconocido') salud.canales[id] = anotar(salud.canales[id], r, Date.now());
+      if (++n % 100 === 0) log(`  ${n}/${sinVeredicto.length}`);
+      return r.estado === 'emite' ? id : null;
+    }, op.concurrencia);
+    for (const id of nota) if (id) conservados.add(id);
+  }
+  if (desaparecen.length) {
+    log(`  siguen emitiendo (se conservan): ${conservados.size} · se retiran: ${desaparecen.length - conservados.size}`);
+  }
+
+  // ── el filtro de verdad: solo lo que consta que emite ──
+  // Un canal nunca comprobado se queda si ya estaba publicado; si no, la app se
+  // quedaría vacía mientras avanza la primera pasada (tarda días en verse todo).
+  const sanos = new Set(publicables(salud, idsDelBarrido, idsDeAyer));
+  const datosPublicables = { ...datos, canales: datos.canales.filter((c) => sanos.has(c.id)) };
+  const deAyerPublicables = deAyer.filter((p) => !p.id || sanos.has(p.id));
+  log(`se publican ${datosPublicables.canales.length} de ${datos.canales.length} canales del barrido`);
+
+  let salida;
+  try {
+    salida = construir(datosPublicables, {
+      previos: deAyerPublicables, minimo: op.minimo, tope: op.tope, perderMax: PERDER_MAX,
+      conservados,
+    });
+  } catch (e) {
+    console.error('NO SE PUBLICA:', e.message);
+    process.exit(1);
+  }
+
+  const r = salida.resumen;
+  log('');
+  log(`  canales   : ${r.canales} (nuevos ${r.nuevos}, quitados ${r.quitados}, sin id ${r.sinId}` +
+      `${r.recortados ? `, recortados ${r.recortados}` : ''})`);
+  log(`  grupos    : ${r.grupos} · shards: ${r.shards}`);
+  log(`  version   : ${r.version}`);
+  log(`  despertar : ${r.despertarMs} ms · barrido: ${Math.round(r.msBarrido / 1000)} s`);
+  if (r.fallos.length) {
+    log(`  avisos    : ${r.fallos.length} temas con fallo (se sigue con el resto)`);
+    for (const f of r.fallos.slice(0, 10)) log(`     · ${f}`);
+  }
+
+  // La versión ya publicada: si es la misma, no hay nada que hacer.
+  let versionActual = '';
+  try {
+    versionActual = JSON.parse(await readFile(join(RAIZ, 'version.json'), 'utf8')).version || '';
+  } catch { /* primera vez */ }
+  if (versionActual && versionActual === r.version) {
+    log('\nla huella no cambió: no se escribe nada.');
+    return;
+  }
+
+  if (!op.escribir) {
+    log('\n(--ver) no se escribe nada.');
+    return;
+  }
+
+  const sano = resumenSalud(salud);
+  log(`  salud     : ${sano.emiten} emiten · ${sano.caidos} caídos · ${sano.nunca} sin comprobar`);
+
+  const bytes = await escribirTodo(salida.ficheros, RAIZ);
+  const vigentes = new Set(
+    Object.keys(salida.ficheros).filter((f) => f.startsWith('shards/')).map((f) => f.slice(7)),
+  );
+  const sobran = await limpiarShards(RAIZ, vigentes);
+  if (sobran) log(`borrados ${sobran} shards que ya no usa el manifiesto`);
+  // El estado del barrido NO se sirve a la app: es para saber qué pasó.
+  await escribirTodo({
+    'estado/barrido.json': JSON.stringify({
+      ...r, at: datos.at, api: datos.api,
+      salud: resumenSalud(salud),
+      verificacion: informe && {
+        comprobados: informe.comprobados, emiten: informe.emiten,
+        noEmiten: informe.noEmiten, desconocidos: informe.desconectados ?? informe.desconocidos,
+        agotado: informe.agotado, segundos: Math.round(informe.ms / 1000),
+      },
+    }, null, 2),
+  }, RAIZ);
+
+  log(`\nescritos ${Object.keys(salida.ficheros).length} ficheros · ${(bytes / 1024).toFixed(0)} KB`);
+  log('commit y push: Cloudflare Pages lo redespliega solo.');
+}
+
+main().catch((e) => {
+  console.error('COLECTOR FALLÓ:', e && e.message ? e.message : e);
+  process.exit(1);
+});
