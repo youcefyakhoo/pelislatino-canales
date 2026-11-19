@@ -22,6 +22,7 @@
  */
 
 import { clave, huella, idLiveDe, slug, urlCanal } from './barrido.mjs';
+import { colocarExternos } from './fuentes.mjs';
 
 /** Canales por shard. 150 es lo que usa el repo y lo que la app ya tolera. */
 export const CHUNK = 150;
@@ -159,7 +160,10 @@ export function fusionar(barrido, previos = [], { tope = 0, conservados = null }
   for (const c of barrido.canales) {
     if (yaPuestos.has(c.id)) continue;
     yaPuestos.add(c.id);
-    nuevos.push(aCanalApi(c));
+    // Un canal que ya viene en el esquema de la app (title + options) se deja TAL CUAL.
+    // Son los externos de `fuentes.mjs`: si se les pasa por `aCanalApi` salen vacíos,
+    // porque esa función espera el esquema de Drama (nombre/logo/tema).
+    nuevos.push(Array.isArray(c.options) && c.title ? c : aCanalApi(c));
   }
   // Dentro de los nuevos se respeta el orden de `barrido.canales`, que es el de los
   // temas del proveedor.
@@ -276,9 +280,17 @@ export function versionDe(canales) {
  * @returns {{ficheros: Record<string,string>, resumen: object}}
  */
 export function construir(barrido, {
-  previos = [], minimo = 0, tope = 0, perderMax = 0, conservados = null,
+  previos = [], minimo = 0, tope = 0, perderMax = 0, conservados = null, externos = [],
 } = {}) {
-  const f = fusionar(barrido, previos, { tope, conservados });
+  // El orden final lo manda `fusionar` (los canales de ayer primero, en su orden). Los
+  // externos se intercalan AQUÍ, sobre ese orden ya resuelto: si se meten antes, la
+  // fusión los manda al final (no tienen `id` de Drama) y el tope se los come. Medido:
+  // así quedaban 0 externos en el alcance corto.
+  const f = fusionar(barrido, previos, { tope: 0, conservados });
+  if (externos && externos.length) {
+    f.canales = colocarExternos(f.canales, externos, { tope });
+  }
+  if (tope > 0 && f.canales.length > tope) f.canales = f.canales.slice(0, tope);
   if (minimo && f.canales.length < minimo) {
     throw new Error(
       `el barrido trajo ${f.canales.length} canales y el mínimo para publicar es ${minimo}. ` +

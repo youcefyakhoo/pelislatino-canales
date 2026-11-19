@@ -9,7 +9,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
-  canalesExternos, grupoDe, idExterno, insertarExternos, colocarExternos, probarExterno, PREFIJO,
+  canalesExternos, grupoDe, idExterno, insertarExternos, colocarExternos, probarExterno,
+  agruparPorNombre, quitarRepetidos, PREFIJO,
 } from './fuentes.mjs';
 
 const json = { channels: [
@@ -31,23 +32,37 @@ test('se extraen los http(s) y se descarta dramalive:// (eso ya lo trae Drama)',
   assert.ok(c.every((x) => x.externo === true));
 });
 
-test('un canal con dos servidores da dos entradas (se prueban todas)', () => {
-  const c = canalesExternos(json).filter((x) => x.nombre === 'CNN Español');
-  assert.equal(c.length, 2);
-  assert.notEqual(c[0].id, c[1].id);
+test('un canal con dos servidores es UN canal con dos opciones', () => {
+  const brutos = canalesExternos(json).filter((x) => x.nombre === 'CNN Español');
+  assert.equal(brutos.length, 2);                       // dos URLs de entrada
+  const agrupados = agruparPorNombre(brutos);
+  assert.equal(agrupados.length, 1);                    // un canal
+  assert.equal(agrupados[0].urls.length, 2);            // con sus dos servidores
 });
 
-test('el id es estable para la misma URL y distinto para otra', () => {
-  assert.equal(idExterno('http://a/x.m3u8'), idExterno('http://a/x.m3u8'));
-  assert.notEqual(idExterno('http://a/x.m3u8'), idExterno('http://a/y.m3u8'));
+test('el id va por NOMBRE: el mismo canal con otra URL es el mismo canal', () => {
+  assert.equal(idExterno('America TV'), idExterno('america tv'));
+  assert.equal(idExterno('America TV'), idExterno('AMÉRICA TV'));   // sin tildes
+  assert.notEqual(idExterno('America TV'), idExterno('America TV 2'));
 });
 
-test('los grupos se traducen al catálogo', () => {
-  assert.equal(grupoDe('peliculas'), 'Peliculas');
-  assert.equal(grupoDe('Películas'), 'Peliculas');
-  assert.equal(grupoDe('Noticias'), 'Noticias');
-  assert.equal(grupoDe('general'), 'Deportes en Vivo');
-  assert.equal(grupoDe('loquesea'), 'Directo (sin Drama)');
+test('no se publica un externo cuyo nombre ya está en el catálogo de Drama', () => {
+  const ext = [
+    { id: 'a', nombre: 'America TV', urls: ['http://a'], tema: 'News' },
+    { id: 'b', nombre: 'Canal Nuevo', urls: ['http://b'], tema: 'News' },
+  ];
+  const out = quitarRepetidos(ext, ['America TV (720p)', 'Otro']);
+  assert.deepEqual(out.map((c) => c.nombre), ['Canal Nuevo']);
+});
+
+test('los grupos se traducen a los del catálogo, que están en INGLÉS', () => {
+  // Si esto se rompe, los externos dejan de caer en su pestaña y se van todos al
+  // principio del catálogo (pasó: 600 de 600 en el alcance corto).
+  assert.equal(grupoDe('peliculas'), 'Movies');
+  assert.equal(grupoDe('Películas'), 'Movies');
+  assert.equal(grupoDe('Noticias'), 'News');
+  assert.equal(grupoDe('general'), 'Sports');
+  assert.equal(grupoDe('loquesea'), 'Entertainment');   // grupo que SÍ existe
 });
 
 test('los externos se meten AL FINAL de su grupo, no al final del catálogo', () => {
@@ -137,8 +152,10 @@ test('los externos caen DENTRO del alcance corto (600), no detrás de 12.000', (
   const out = colocarExternos(drama, ext, { tope: 12000 });
   const corto = out.slice(0, 600);
   const dentro = corto.filter((c) => c.d === 'externo').length;
-  // 12000/600 = paso 20 -> un externo cada 20 -> ~30 en los primeros 600
-  assert.ok(dentro >= 25 && dentro <= 35, 'esperaba ~30 externos en el corto, hay ' + dentro);
+  // Cuota del 10 %: ~60 externos de 600. Ni cero (antes no se veía ninguno) ni todos
+  // (un intento anterior metió 600 y se comió el catálogo de Drama).
+  assert.ok(dentro >= 50 && dentro <= 70, 'esperaba ~60 externos en el corto, hay ' + dentro);
+  assert.ok(600 - dentro >= 530, 'Drama tiene que seguir siendo la mayoría del corto');
   // y no se pierde ninguno
   assert.equal(out.filter((c) => c.d === 'externo').length, 600);
 });
@@ -153,13 +170,20 @@ test('los de Drama conservan su orden relativo', () => {
   assert.deepEqual(soloDrama, drama.map((c) => c.title));
 });
 
-test('una categoría que Drama NO tiene va al principio (si no, no se vería)', () => {
+test('una categoría que Drama NO tiene entra igual, pero intercalada', () => {
   const drama = Array.from({ length: 300 }, (_, i) => ({
     title: 'D' + i, image: '', category: 'G', options: [{ url: 'dramalive://x' + i }],
   }));
-  const ext = [{ id: 'e', nombre: 'Canal Cultura', tema: 'Cultura', url: 'http://c' }];
+  // Proporción realista: 20 externos para 300 de Drama (como 388 para 12.000).
+  const ext = Array.from({ length: 20 }, (_, i) => ({
+    id: 'e' + i, nombre: 'Canal Cultura ' + i, tema: 'Cultura' + (i % 3), url: 'http://c' + i,
+  }));
   const out = colocarExternos(drama, ext, { tope: 0 });
-  assert.equal(out[0].title, 'Canal Cultura');
+  // Entra pronto (primer hueco), pero NO en bloque delante de todo el catálogo: con
+  // 388 externos, ponerlos delante dejaba el alcance corto sin un solo canal de Drama.
+  const pos = out.findIndex((c) => c.d === 'externo');
+  assert.ok(pos > 0 && pos < 40, 'esperaba el primer externo en el primer hueco, está en ' + pos);
+  assert.equal(out.filter((c) => c.d === 'externo').length, 20, 'no se pierde ninguno');
 });
 
 test('cada externo cae en la pestaña de su grupo', () => {

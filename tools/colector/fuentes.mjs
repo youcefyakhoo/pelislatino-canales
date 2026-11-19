@@ -42,23 +42,40 @@ export const EXTERNA_POR_DEFECTO =
 /** Prefijo de los ids de esta fuente: así no se confunden con los `live_tv_…`. */
 export const PREFIJO = 'ext_';
 
-/** Traducción de los grupos de la fuente externa a los del catálogo. */
+/**
+ * Traducción de los grupos de la fuente externa a los del catálogo de Drama.
+ *
+ * IMPORTANTE: los nombres tienen que coincidir LETRA A LETRA con los que ya usa el
+ * catálogo, y esos están en INGLÉS (`News`, `Movies`, `Sports`, `Kids`…). La primera
+ * versión los traducía al español (`Noticias`, `Peliculas`) y el resultado fue que
+ * NINGÚN canal externo caía en su pestaña: se creaban grupos nuevos y, como no existían
+ * en Drama, todos se iban al principio del catálogo (600 de 600 en el alcance corto).
+ * Drama sí tiene grupos de país en su idioma (`Peru`, `Mexico`), y esos se respetan.
+ */
 const GRUPOS = {
-  internacionales: 'Internacionales',
-  internacional: 'Internacionales',
-  peliculas: 'Peliculas',
-  peliculas: 'Peliculas',
-  películas: 'Peliculas',
-  noticias: 'Noticias',
-  deportes: 'Deportes',
-  general: 'Deportes en Vivo',
-  all: 'Deportes en Vivo',
-  entretenimiento: 'Entretenimiento',
-  infantil: 'Contenido Infantil',
-  cultura: 'Cultura',
-  musica: 'Musica',
-  música: 'Musica',
-  religion: 'Religioso',
+  internacionales: 'News',              // canales de otro país: la pestaña que más se usa
+  internacional: 'News',
+  noticias: 'News',
+  news: 'News',
+  peliculas: 'Movies',
+  'peliculas de cine': 'Movies',
+  movies: 'Movies',
+  deportes: 'Sports',
+  sports: 'Sports',
+  general: 'Sports',
+  all: 'Sports',
+  entretenimiento: 'Entertainment',
+  entertainment: 'Entertainment',
+  infantil: 'Kids',
+  kids: 'Kids',
+  cultura: 'Documentary',
+  documentales: 'Documentary',
+  documentary: 'Documentary',
+  musica: 'Music',
+  music: 'Music',
+  religion: 'Religious',
+  religioso: 'Religious',
+  religious: 'Religious',
 };
 
 /** Normaliza un nombre de grupo: minúsculas y sin tildes. */
@@ -68,12 +85,66 @@ function clave(t) {
 
 /** El grupo del catálogo al que va un canal externo. */
 export function grupoDe(categoria) {
-  return GRUPOS[clave(categoria)] || 'Directo (sin Drama)';
+  // Si no se reconoce, va a `Entertainment` (existe en el catálogo) en vez de crear un
+  // grupo nuevo: un grupo con 3 canales que el usuario no encuentra no sirve de nada.
+  return GRUPOS[clave(categoria)] || 'Entertainment';
 }
 
-/** El id estable de un canal externo: su URL. Si la URL cambia, es otro canal. */
-export function idExterno(url) {
-  return PREFIJO + huella(String(url));
+/** Los grupos que crea la fuente externa: para avisar si alguno no existe en Drama. */
+export const GRUPOS_EXTERNOS = Object.freeze(Object.values(GRUPOS));
+
+/** Nombre normalizado, para comparar canales y para el id. */
+export function normalizar(t) {
+  return String(t || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+}
+
+/**
+ * El id estable de un canal externo: su NOMBRE normalizado.
+ *
+ * Antes era la URL, y estaba mal: belkafut reparte un mismo canal en varios servidores
+ * (`America TV` con 3 URLs), así que salía tres veces en el catálogo. Con el nombre,
+ * el canal es uno y sus servidores son OPCIONES (que es lo que pidió el pedido 57:
+ * mostrar todas).
+ */
+export function idExterno(nombre) {
+  return PREFIJO + huella(normalizar(nombre));
+}
+
+/**
+ * Agrupa las entradas de belkafut: un canal por nombre, con TODAS sus URLs.
+ *
+ * Medido: 691 URLs → 460 canales. Los 231 restantes eran el mismo canal repetido.
+ */
+export function agruparPorNombre(externos) {
+  const porId = new Map();
+  for (const c of externos) {
+    const id = c.id || idExterno(c.nombre);
+    const previo = porId.get(id);
+    if (!previo) {
+      porId.set(id, { ...c, id, urls: [c.url] });
+      continue;
+    }
+    if (!previo.urls.includes(c.url)) previo.urls.push(c.url);
+    // El logo y el grupo del primero mandan; si el primero no traía logo, se usa otro.
+    if (!previo.logo && c.logo) previo.logo = c.logo;
+  }
+  return [...porId.values()];
+}
+
+/**
+ * Quita los externos cuyo nombre ya está en el catálogo de Drama.
+ *
+ * Son 122 de 691. La app dedupe por nombre (`FusionRejilla.conDramaPrimero`), así que
+ * esos no se verían igualmente; publicarlos solo engorda el JSON. Y si el de Drama
+ * está en el catálogo es porque consta que emite (lo comprueba `salud.mjs`).
+ */
+export function quitarRepetidos(externos, titulosDrama) {
+  // Se compara con el nombre SIN la etiqueta de calidad: Drama titula `America TV (720p)`
+  // y belkafut `America TV`. Sin quitarla, los 122 repetidos seguirían entrando.
+  const sinCalidad = (t) => normalizar(String(t || '').replace(/\(\s*\d{3,4}\s*[pi]\s*\)/gi, ''));
+  const ya = new Set((titulosDrama || []).map(sinCalidad));
+  return externos.filter((c) => !ya.has(sinCalidad(c.nombre)));
 }
 
 /**
@@ -98,7 +169,9 @@ export function canalesExternos(json) {
       if (!/^https?:\/\//i.test(url)) continue;
       if (porUrl.has(url)) continue;
       porUrl.set(url, {
-        id: idExterno(url),
+        // El id va por NOMBRE: `agruparPorNombre` junta después los servidores del
+        // mismo canal. Poniendo aquí el id de la URL, cada servidor era «otro canal».
+        id: idExterno(nombre || url),
         nombre: nombre || 'Canal',
         logo: String(c.imageUrl || ''),
         tema: grupoDe(c.category),
@@ -204,7 +277,22 @@ export async function probarExterno(url, opciones = {}) {
 export function colocarExternos(canales, externos, opciones = {}) {
   if (!externos.length) return canales;
   const tope = opciones.tope || canales.length || 12000;
-  const paso = Math.max(1, Math.round(canales.length / Math.max(1, externos.length)));
+  // El `paso` se calcula sobre el TAMAÑO QUE SE VA A PUBLICAR (`tope`), no sobre el
+  // catálogo entrante. Con 691 externos y tope 12.000: uno cada 18 canales, ~33 dentro
+  // del alcance corto. Calculándolo sobre la entrada (11.999) salían 600 en el corto:
+  // los externos copaban los 600 puestos y no se veía Drama.
+  // CUOTA: los externos son un COMPLEMENTO, no el catálogo. Se les reserva una
+  // fracción del alcance corto (`cuota`, 10 % por defecto = 60 de 600) y se reparten
+  // por igual: un externo cada `paso` canales de Drama.
+  //
+  // Lo que había antes y por qué no valía: `paso = canales / externos`. Con 691
+  // externos y 12.000 canales daba 17, pero luego el alcance corto recortaba a 600 y
+  // se quedaba con 600 externos y casi ningún canal de Drama. Y con `paso` calculado
+  // sobre 600 daba 1: un externo entre cada dos canales.
+  const corto = Math.min(canales.length, opciones.corto || 600);
+  const cuota = opciones.cuota || 0.10;
+  const deseados = Math.min(externos.length, Math.max(1, Math.round(corto * cuota)));
+  const paso = Math.max(1, Math.round(corto / deseados));
 
   // Los que Drama no tiene (Cultura, Directo…) van al principio, en un bloque: si
   // fueran al final no se verían en el alcance corto, que es donde hay que verlos.
@@ -216,7 +304,8 @@ export function colocarExternos(canales, externos, opciones = {}) {
     title: c.nombre,
     image: c.logo,
     category: c.tema,
-    options: [{ url: c.url }],
+    // Todas sus URLs: si un servidor cae, la app prueba el siguiente.
+    options: (c.urls && c.urls.length ? c.urls : [c.url]).map((u) => ({ url: u })),
     d: 'externo',   // la app lo ignora; sirve para auditar
   });
 
@@ -228,26 +317,35 @@ export function colocarExternos(canales, externos, opciones = {}) {
     colas.get(k).push(c);
   }
 
-  const salida = sinGrupo.map(aOpcion);
+  // Los «sin grupo» NO van en bloque al principio: con 388 externos y 600 puestos, el
+  // alcance corto empezaba con 78 externos seguidos y no se veía ni un canal de Drama.
+  // Se intercalan también con el mismo `paso`.
+  const colaSinGrupo = sinGrupo.slice();
+  const salida = [];
   const puestos = new Set();
   for (let i = 0; i < canales.length; i++) {
     salida.push(canales[i]);
     // Un hueco cada `paso`: entra el siguiente externo de la MISMA categoría del canal
     // que acaba de pasar; si esa categoría ya no tiene, se usa la siguiente con cola.
-    if ((i + 1) % paso === 0 && puestos.size < conGrupo.length && salida.length < tope) {
+    // El primer hueco es de los «sin grupo» (así aparecen desde el principio, pero no
+    // todos juntos); después, los del grupo del canal que acaba de pasar.
+    if ((i + 1) % paso === 0 && salida.length < tope && (colaSinGrupo.length || puestos.size < conGrupo.length)) {
       const k = clave(canales[i].category);
       let elegido = colas.get(k);
       if (!elegido || !elegido.length) {
-        for (const [kk, cola] of colas) { if (cola.length) { elegido = cola; break; } }
+        for (const [, cola] of colas) { if (cola.length) { elegido = cola; break; } }
       }
-      if (elegido && elegido.length) {
-        const c = elegido.shift();
+      // Alterna: un «sin grupo» cada dos huecos, para que no se junten todos.
+      const deSinGrupo = colaSinGrupo.length && (puestos.size % 2 === 0 || !(elegido && elegido.length));
+      const c = deSinGrupo ? colaSinGrupo.shift() : (elegido && elegido.length ? elegido.shift() : null);
+      if (c) {
         salida.push(aOpcion(c));
         puestos.add(c.id);
       }
     }
   }
   // Los que no cupieron (no debería, pero por si acaso) al final.
+  for (const c of colaSinGrupo) salida.push(aOpcion(c));
   for (const cola of colas.values()) for (const c of cola) salida.push(aOpcion(c));
   return salida;
 }
@@ -275,7 +373,7 @@ export function insertarExternos(canales, externos) {
     title: c.nombre,
     image: c.logo,
     category: c.tema,
-    options: [{ url: c.url }],
+    options: (c.urls && c.urls.length ? c.urls : [c.url]).map((u) => ({ url: u })),
     // Campo de apoyo (la app lo ignora): de dónde salió.
     d: 'externo',
   });

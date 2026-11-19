@@ -31,7 +31,7 @@ import { fileURLToPath } from 'node:url';
 import { Barrido } from './barrido.mjs';
 import { construir, normalesDe } from './catalogo.mjs';
 import {
-  EXTERNA_POR_DEFECTO, canalesExternos, probarExterno, colocarExternos,
+  EXTERNA_POR_DEFECTO, canalesExternos, probarExterno, agruparPorNombre, quitarRepetidos,
 } from './fuentes.mjs';
 import {
   leerSalud, verificarCanales, resumenSalud, publicables, anotar,
@@ -274,8 +274,11 @@ async function main() {
       clearTimeout(corte);
       if (!r.ok) throw new Error('HTTP ' + r.status);
       const json = await r.json();
-      externos = canalesExternos(json);
-      log(`  ${externos.length} canales externos (URLs directas, no Drama)`);
+      const urls = canalesExternos(json);
+      // Un canal de belkafut viene con varios servidores: es UNO con varias opciones,
+      // no tres canales. Medido: 691 URLs -> 460 canales.
+      externos = agruparPorNombre(urls);
+      log(`  ${urls.length} URLs -> ${externos.length} canales externos (no Drama)`);
     } catch (e) {
       // Si la fuente externa falla, NO se pierden los que ya estaban publicados: se
       // recuperan del catálogo de ayer, que los trae como canales sin id_live.
@@ -307,6 +310,11 @@ async function main() {
         if (++hechos % 100 === 0) log(`    ${hechos}/${aProbar.length}`);
       }, 6);
     }
+    // Los que ya están en el catálogo de Drama no se publican: la app dedupe por
+    // nombre y se verían igualmente (122 de los 460).
+    externos = quitarRepetidos(externos, deAyer.map((p) => p.titulo));
+    log(`  externos que no están ya en Drama: ${externos.length}`);
+
     // Qué se publica: emite, o desconocido (no se castiga un servidor lento), o el
     // primer fallo de un canal que venía funcionando. 403/404 repetido = fuera.
     externos = externos.filter((c) => {
@@ -335,19 +343,11 @@ async function main() {
 
   // Los externos se meten en su grupo, al final de él, para que caigan dentro de los
   // alcances (que son prefijos: corto = 600).
-  if (externos.length) {
-    // Repartidos por grupos, no pegados al final: el alcance corto es un prefijo de
-    // 600 y el catálogo de Drama tiene ~1.000 por grupo, así que al final no se vería
-    // ninguno. Ver `colocarExternos`.
-    datosPublicables.canales = colocarExternos(datosPublicables.canales, externos, { tope: op.tope });
-    log(`catálogo con externos: ${datosPublicables.canales.length} canales`);
-  }
-
   let salida;
   try {
     salida = construir(datosPublicables, {
       previos: deAyerPublicables, minimo: op.minimo, tope: op.tope, perderMax: PERDER_MAX,
-      conservados,
+      conservados, externos,
     });
   } catch (e) {
     console.error('NO SE PUBLICA:', e.message);
