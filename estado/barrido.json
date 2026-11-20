@@ -1,32 +1,32 @@
 {
   "api": "https://dramalive-api-08th.onrender.com",
-  "at": "2026-11-20T07:34:58.392Z",
+  "at": "2026-11-20T20:37:48.379Z",
   "canales": 12000,
-  "nuevos": 2458,
+  "nuevos": 2600,
   "quitados": 0,
   "sinId": 387,
   "recortados": 0,
   "grupos": 156,
   "shards": 206,
-  "version": "24ab9604",
-  "despertarMs": 321,
-  "msBarrido": 90108,
+  "version": "45a5a344",
+  "despertarMs": 22077,
+  "msBarrido": 112051,
   "fallos": [],
   "salud": {
-    "canales": 6499,
-    "emiten": 1577,
-    "caidos": 4900,
-    "nunca": 22
+    "canales": 6787,
+    "emiten": 1585,
+    "caidos": 5179,
+    "nunca": 23
   },
-  "cobertura": 0.3174,
+  "cobertura": 0.3259,
   "externos": 0,
   "externosVivos": 0,
   "verificacion": {
-    "comprobados": 3726,
-    "emiten": 1518,
-    "noEmiten": 2203,
-    "desconocidos": 5,
+    "comprobados": 3536,
+    "emiten": 1512,
+    "noEmiten": 2018,
+    "desconocidos": 6,
     "agotado": true,
-    "segundos": 5421
+    "segundos": 5423
   }
 }
